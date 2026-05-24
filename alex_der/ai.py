@@ -35,6 +35,44 @@ Guidelines:
 """
 
 
+def _sanitize_messages(messages: list[dict]) -> list[dict]:
+    """
+    Convert stored conversation messages into the format Ollama actually accepts.
+
+    Ollama differences from OpenAI-style storage:
+    - assistant tool_calls: no `id` or `type` wrapper; arguments must be a dict (not a JSON string)
+    - tool result messages: only `role` + `content` — no `tool_call_id` or `name`
+    """
+    out = []
+    for msg in messages:
+        role = msg.get("role", "")
+
+        if role == "assistant":
+            clean: dict[str, Any] = {"role": "assistant", "content": msg.get("content", "")}
+            raw_tcs = msg.get("tool_calls")
+            if raw_tcs:
+                ollama_tcs = []
+                for tc in raw_tcs:
+                    fn = tc.get("function", {})
+                    args = fn.get("arguments", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {}
+                    ollama_tcs.append({"function": {"name": fn.get("name", ""), "arguments": args}})
+                clean["tool_calls"] = ollama_tcs
+            out.append(clean)
+
+        elif role == "tool":
+            # Ollama only accepts role + content for tool results
+            out.append({"role": "tool", "content": msg.get("content", "")})
+
+        else:
+            out.append(msg)
+    return out
+
+
 class OllamaClient:
     def __init__(self, host: str, model: str, temperature: float = 0.1, max_tokens: int = 8192):
         self.host = host.rstrip("/")
@@ -83,7 +121,7 @@ class OllamaClient:
         """
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + _sanitize_messages(messages),
             "stream": True,
             "options": {
                 "temperature": self.temperature,
