@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
 # bob-der2.0 launcher — codename: alex-der
-# Usage: ./alex-der [args...]
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Activate venv if present
-if [[ -f "$SCRIPT_DIR/.venv/bin/activate" ]]; then
-    source "$SCRIPT_DIR/.venv/bin/activate"
-fi
-
-exec python3 "$SCRIPT_DIR/main.py" "$@"
+exec "/usr/bin/python3" "$SCRIPT_DIR/main.py" "$@"
