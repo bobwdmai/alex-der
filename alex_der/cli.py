@@ -188,6 +188,29 @@ def _render_tool_result(name: str, result: dict) -> str:
         disp = ", ".join(sel) if isinstance(sel, list) else str(sel)
         return f"[{color}]{icon} selected: [bold]{disp}[/bold][/{color}]"
 
+    if name == "package":
+        output = result.get("output", "").strip()
+        cmd = result.get("command", "")
+        mgr = result.get("manager", "")
+        action = result.get("action", "")
+        pkgs = result.get("packages", [])
+
+        # For "check", pretty-print the results table
+        if action == "check":
+            t = Table(show_header=True, box=None, padding=(0, 2))
+            t.add_column("Package"); t.add_column("Installed"); t.add_column("Version")
+            for pkg, info in result.get("results", {}).items():
+                installed = "[green]yes[/green]" if info.get("installed") else "[red]no[/red]"
+                t.add_row(pkg, installed, info.get("version", ""))
+            console.print(t)
+            return f"[{color}]{icon} {mgr} check[/{color}]"
+
+        if output:
+            console.print(Syntax(output[-2000:], "bash", theme="monokai", word_wrap=True))
+        label = f"{mgr} {action} {' '.join(pkgs)}" if pkgs else f"{mgr} {action}"
+        rc = result.get("returncode", 0)
+        return f"[{color}]{icon} {label}  [dim](rc={rc})[/dim][/{color}]"
+
     return f"[{color}]{icon}[/{color}] {json.dumps(result)[:200]}"
 
 
@@ -241,7 +264,8 @@ def cmd_tools():
         "keyboard": ("Input", "Simulate keyboard via xdotool"),
         "add_tool": ("Meta", "Add a new tool at runtime"),
         "compact_conversation": ("Meta", "Compress conversation history"),
-        "ask_user":             ("Meta", "Ask user a question with arrow-key picker"),
+        "ask_user":             ("Meta",     "Ask user a question with arrow-key picker"),
+        "package":              ("Packages", "Install/remove/check system & language packages"),
     }
     for schema in TOOL_SCHEMAS:
         n = schema["function"]["name"]
@@ -474,9 +498,19 @@ def run_agent_turn(client: OllamaClient, conv: Conversation, cfg: Config) -> boo
 
             all_denied = False
 
-            with Live(LoadingAnimation(f"running {name}"), console=console,
-                      refresh_per_second=12, transient=True):
+            # package installs may need sudo to prompt for a password via
+            # /dev/tty — don't run them inside a Live context that owns the
+            # terminal output.
+            if name == "package":
+                pkgs = args.get("packages", [])
+                mgr  = args.get("manager", "auto")
+                console.print(f"  [dim]Running {mgr} {args.get('action','')} {' '.join(pkgs)} ...[/dim]")
+                console.file.flush()
                 result = dispatch(name, args, cfg.working_dir)
+            else:
+                with Live(LoadingAnimation(f"running {name}"), console=console,
+                          refresh_per_second=12, transient=True):
+                    result = dispatch(name, args, cfg.working_dir)
 
             summary = _render_tool_result(name, result)
             console.print(f"  {summary}")

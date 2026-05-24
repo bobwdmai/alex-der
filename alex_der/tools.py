@@ -255,6 +255,46 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "package",
+            "description": (
+                "Install, remove, update, check, or list system/language packages. "
+                "Supports: apt (system), pip (Python), npm (Node), cargo (Rust), "
+                "snap, gem (Ruby), go. "
+                "Set manager='auto' to pick the best one automatically. "
+                "apt/snap use sudo automatically. "
+                "WARNING: this runs real install commands — always confirm with the user first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["install", "remove", "update", "check", "search", "list"],
+                        "description": "Operation to perform",
+                    },
+                    "packages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Package name(s). Empty list is valid for 'list' and apt 'update'.",
+                    },
+                    "manager": {
+                        "type": "string",
+                        "enum": ["auto", "apt", "pip", "pip3", "npm", "cargo", "snap", "gem", "go", "flatpak"],
+                        "description": "Package manager (default: auto-detect from environment)",
+                    },
+                    "flags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Extra flags passed verbatim, e.g. ['--user'] for pip or ['--classic'] for snap",
+                    },
+                },
+                "required": ["action", "packages"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_user",
             "description": (
                 "Ask the user a question with selectable options. "
@@ -834,6 +874,189 @@ def tool_add_tool(name: str, description: str, parameters_schema: str, python_bo
     }
 
 
+# ── Package manager ───────────────────────────────────────────────────────────
+
+_MGR_NEEDS_SUDO = {"apt", "apt-get", "snap", "flatpak"}
+
+def _detect_manager() -> str:
+    for m in ("pip3", "pip", "npm", "cargo", "apt", "snap", "gem"):
+        if shutil.which(m):
+            return m
+    return ""
+
+def _can_sudo_nopass() -> bool:
+    r = subprocess.run(["sudo", "-n", "true"], capture_output=True)
+    return r.returncode == 0
+
+
+def tool_package(action: str, packages: list, cwd: str,
+                 manager: str = "auto", flags: list = None) -> dict:
+    flags = flags or []
+
+    # Normalise package list
+    if isinstance(packages, str):
+        packages = [p.strip() for p in packages.replace(",", " ").split() if p.strip()]
+
+    # Resolve manager
+    if manager == "auto":
+        manager = _detect_manager()
+        if not manager:
+            return {"ok": False, "error": "No supported package manager found (apt, pip, npm, cargo, snap)"}
+    manager = manager.lower()
+    if manager == "pip" and shutil.which("pip3"):
+        manager = "pip3"
+
+    needs_sudo = manager in _MGR_NEEDS_SUDO
+    sudo = ["sudo"] if needs_sudo else []
+
+    # ── Build command ─────────────────────────────────────────────────────────
+    cmd: list[str] = []
+
+    if action == "install":
+        if manager in ("apt", "apt-get"):
+            cmd = sudo + ["apt-get", "install", "-y"] + flags + packages
+        elif manager in ("pip", "pip3"):
+            cmd = [manager, "install"] + flags + packages
+        elif manager == "npm":
+            cmd = ["npm", "install", "-g"] + flags + packages
+        elif manager == "cargo":
+            cmd = ["cargo", "install"] + flags + packages
+        elif manager == "snap":
+            cmd = sudo + ["snap", "install"] + flags + packages
+        elif manager == "gem":
+            cmd = ["gem", "install"] + flags + packages
+        elif manager == "go":
+            cmd = ["go", "install"] + flags + [f"{p}@latest" for p in packages]
+        elif manager == "flatpak":
+            cmd = sudo + ["flatpak", "install", "-y"] + flags + packages
+        else:
+            return {"ok": False, "error": f"install not supported for {manager}"}
+
+    elif action == "remove":
+        if manager in ("apt", "apt-get"):
+            cmd = sudo + ["apt-get", "remove", "-y"] + flags + packages
+        elif manager in ("pip", "pip3"):
+            cmd = [manager, "uninstall", "-y"] + flags + packages
+        elif manager == "npm":
+            cmd = ["npm", "uninstall", "-g"] + flags + packages
+        elif manager == "cargo":
+            cmd = ["cargo", "uninstall"] + flags + packages
+        elif manager == "snap":
+            cmd = sudo + ["snap", "remove"] + flags + packages
+        else:
+            return {"ok": False, "error": f"remove not supported for {manager}"}
+
+    elif action == "update":
+        if manager in ("apt", "apt-get"):
+            # update = refresh package lists; if packages given also upgrade them
+            update_cmd = sudo + ["apt-get", "update"]
+            r = subprocess.run(update_cmd, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                return {"ok": False, "error": r.stdout + r.stderr, "command": update_cmd}
+            if packages:
+                cmd = sudo + ["apt-get", "install", "--only-upgrade", "-y"] + packages
+            else:
+                return {"ok": True, "action": "update", "manager": manager,
+                        "output": r.stdout[-2000:], "returncode": 0}
+        elif manager in ("pip", "pip3"):
+            cmd = [manager, "install", "--upgrade"] + flags + packages
+        elif manager == "npm":
+            cmd = ["npm", "update", "-g"] + flags + (packages or [])
+        else:
+            return {"ok": False, "error": f"update not supported for {manager}"}
+
+    elif action == "check":
+        results: dict[str, Any] = {}
+        for pkg in packages:
+            if manager in ("pip", "pip3"):
+                r = subprocess.run([manager, "show", pkg], capture_output=True, text=True)
+                info = {}
+                for line in r.stdout.splitlines():
+                    if ": " in line:
+                        k, _, v = line.partition(": ")
+                        info[k.lower()] = v
+                results[pkg] = {"installed": r.returncode == 0, "version": info.get("version", "")}
+            elif manager in ("apt", "apt-get"):
+                r = subprocess.run(["dpkg", "-s", pkg], capture_output=True, text=True)
+                ver = ""
+                for line in r.stdout.splitlines():
+                    if line.startswith("Version:"):
+                        ver = line.split(": ", 1)[-1]
+                results[pkg] = {"installed": r.returncode == 0, "version": ver}
+            elif manager == "npm":
+                r = subprocess.run(["npm", "list", "-g", "--depth=0", pkg],
+                                    capture_output=True, text=True)
+                results[pkg] = {"installed": pkg in r.stdout}
+            elif manager == "snap":
+                r = subprocess.run(["snap", "list", pkg], capture_output=True, text=True)
+                results[pkg] = {"installed": r.returncode == 0}
+            else:
+                results[pkg] = {"installed": bool(shutil.which(pkg))}
+        return {"ok": True, "action": "check", "manager": manager, "results": results}
+
+    elif action == "search":
+        if manager in ("apt", "apt-get"):
+            cmd = ["apt-cache", "search"] + packages
+        elif manager in ("pip", "pip3"):
+            # pip index versions <pkg> (replaces deprecated pip search)
+            if packages:
+                cmd = [manager, "index", "versions", packages[0]]
+            else:
+                return {"ok": False, "error": "search requires at least one package name"}
+        elif manager == "npm":
+            cmd = ["npm", "search", "--no-description"] + packages
+        else:
+            return {"ok": False, "error": f"search not supported for {manager}"}
+
+    elif action == "list":
+        if manager in ("apt", "apt-get"):
+            cmd = ["dpkg", "--get-selections"]
+        elif manager in ("pip", "pip3"):
+            cmd = [manager, "list", "--format=columns"]
+        elif manager == "npm":
+            cmd = ["npm", "list", "-g", "--depth=0"]
+        elif manager == "snap":
+            cmd = ["snap", "list"]
+        elif manager == "cargo":
+            cmd = ["cargo", "install", "--list"]
+        else:
+            return {"ok": False, "error": f"list not supported for {manager}"}
+
+    else:
+        return {"ok": False, "error": f"Unknown action '{action}'. Use install/remove/update/check/search/list"}
+
+    if not cmd:
+        return {"ok": False, "error": "Could not build command"}
+
+    # ── Execute ───────────────────────────────────────────────────────────────
+    try:
+        # stdout captured; stdin=None so sudo can open /dev/tty for password if needed
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=None,
+            text=True,
+            timeout=300,
+        )
+        return {
+            "ok": result.returncode == 0,
+            "action": action,
+            "manager": manager,
+            "packages": packages,
+            "command": " ".join(cmd),
+            "output": result.stdout[-3000:] if result.stdout else "",
+            "returncode": result.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Timed out after 300 s"}
+    except FileNotFoundError as e:
+        return {"ok": False, "error": f"{cmd[0]!r} not found — is {manager} installed?"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _load_dynamic_tools():
     """Load persisted dynamic tools from ~/.alex-der/dynamic_tools.py."""
     if not DYNAMIC_TOOLS_FILE.exists():
@@ -895,6 +1118,11 @@ def dispatch(name: str, args: dict, cwd: str) -> dict:
             args["name"], args["description"], args["parameters_schema"],
             args["python_body"], cwd, args.get("auto_approve", "bash"),
         )
+    elif name == "package":
+        return tool_package(
+            args["action"], args.get("packages", []), cwd,
+            args.get("manager", "auto"), args.get("flags"),
+        )
     elif name == "compact_conversation":
         # Handled specially in cli.py — should not reach here
         return {"ok": True, "signal": "compact"}
@@ -927,6 +1155,7 @@ TOOL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "add_tool":              ("AddTool",  "bright_magenta"),
     "compact_conversation":  ("Compact",  "dim"),
     "ask_user":              ("AskUser",  "bright_cyan"),
+    "package":               ("Package",  "bright_red"),
 }
 
 AUTO_APPROVE_MAP: dict[str, str] = {
@@ -943,5 +1172,6 @@ AUTO_APPROVE_MAP: dict[str, str] = {
     "keyboard":             "auto_approve_bash",
     "add_tool":             "auto_approve_bash",
     "compact_conversation": "auto_approve_bash",
-    "ask_user":             "auto_approve_reads",  # always allowed — user is answering, not approving
+    "ask_user":             "auto_approve_reads",
+    "package":              "auto_approve_bash",   # always requires manual approval
 }
