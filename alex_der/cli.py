@@ -21,6 +21,7 @@ from rich.text import Text
 from .ai import OllamaClient
 from .config import Config
 from .conversation import Conversation
+from .loader import LoadingAnimation, tool_phrase
 from .selector import ask as selector_ask
 from .tools import (
     AUTO_APPROVE_MAP, TOOL_DESCRIPTIONS, TOOL_SCHEMAS,
@@ -361,7 +362,8 @@ def cmd_npm_quick(script: str, cfg: Config):
 def cmd_browse_quick(url: str, cfg: Config):
     """Quick browser fetch and display."""
     from .tools import tool_browse
-    with console.status(f"[dim]Fetching {url}...[/dim]"):
+    with Live(LoadingAnimation("fetching"), console=console,
+              refresh_per_second=12, transient=True):
         result = tool_browse(url, cfg.working_dir)
     _render_tool_result("browse", result)
 
@@ -379,11 +381,16 @@ def run_agent_turn(client: OllamaClient, conv: Conversation, cfg: Config) -> boo
         console.print(Rule(style="dim"))
         console.print("[bold cyan]alex-der[/bold cyan] ", end="")
 
-        with Live(console=console, refresh_per_second=15, transient=False) as live:
+        _anim = LoadingAnimation()
+        with Live(_anim, console=console, refresh_per_second=15, transient=False) as live:
             live_text = Text()
+            _streaming = False
             for event in client.chat_stream(conv.get_messages()):
                 etype = event["type"]
                 if etype == "text":
+                    if not _streaming:
+                        _streaming = True
+                        live.update(live_text)   # swap animation out for text
                     assistant_text += event["delta"]
                     live_text.append(event["delta"])
                     live.update(live_text)
@@ -467,7 +474,8 @@ def run_agent_turn(client: OllamaClient, conv: Conversation, cfg: Config) -> boo
 
             all_denied = False
 
-            with console.status(f"[dim]running {name}...[/dim]", spinner="dots"):
+            with Live(LoadingAnimation(f"running {name}"), console=console,
+                      refresh_per_second=12, transient=True):
                 result = dispatch(name, args, cfg.working_dir)
 
             summary = _render_tool_result(name, result)
