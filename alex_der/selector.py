@@ -144,10 +144,11 @@ def ask(question: str, options: list[str],
     def draw():
         nonlocal rendered
         rendered = _render(question, options, cursor, checked, multi)
-        _write("\n" + "\n".join(rendered) + "\n")
+        # \r\n resets to column 0 before each line — required because Rich may
+        # leave the cursor at a non-zero column, and bare \n only moves down.
+        _write("\r\n" + "\r\n".join(rendered) + "\r\n")
 
     def redraw():
-        # erase: rendered lines + trailing newline
         _erase(len(rendered) + 1)
         draw()
 
@@ -189,9 +190,9 @@ def ask(question: str, options: list[str],
                 else:
                     chosen = options[cursor]
                     if allow_freetext and cursor == len(options) - 1:
-                        # erase the selector, ask for free text
                         _erase(len(rendered) + 1)
-                        chosen = input(f"  {_BOLD}Your answer:{_RST} ").strip()
+                        _write(f"\r  {_BOLD}Your answer:{_RST} ")
+                        chosen = input("").strip()
 
                 result = {"ok": True, "selection": chosen, "cancelled": False}
                 return result
