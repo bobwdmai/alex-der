@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "alex-der"
+version = "2.0.0"
+description = "bob-der2.0 — AI coding assistant powered by Ollama (codename: alex-der)"
+requires-python = ">=3.11"
+dependencies = [
+    "rich>=13.7",
+    "requests>=2.31",
+]
+
+[project.scripts]
+alex-der = "alex_der.cli:main"
+bob-der = "alex_der.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["alex_der*"]
